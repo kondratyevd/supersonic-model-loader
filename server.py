@@ -455,7 +455,7 @@ class Server:
                         gpu_memory[gpu_uuid]['used_memory'] = int(value)
                     elif metric_name in ['nv_gpu_utilization', 'nv_gpu_power_usage', 'nv_gpu_temperature']:
                         self.logger.debug(f"GPU {metric_name}", 
-                                       gpu_uuid=gpu_uuid,
+                                    #    gpu_uuid=gpu_uuid,
                                        value=value,
                                        pod=self.pod_name)
                 except Exception as e:
@@ -474,10 +474,10 @@ class Server:
                     
                     # Log memory information for each GPU
                     self.logger.info("GPU memory information", 
-                                   gpu_uuid=gpu_uuid,
-                                   total_mb=gpu_memory[gpu_uuid]['total_memory'] // (1024 * 1024),
-                                   used_mb=gpu_memory[gpu_uuid]['used_memory'] // (1024 * 1024),
-                                   free_mb=gpu_memory[gpu_uuid]['free_memory'] // (1024 * 1024),
+                                #    gpu_uuid=gpu_uuid,
+                                   mb_total=gpu_memory[gpu_uuid]['total_memory'] // (1024 * 1024),
+                                   mb_used=gpu_memory[gpu_uuid]['used_memory'] // (1024 * 1024),
+                                   mb_free=gpu_memory[gpu_uuid]['free_memory'] // (1024 * 1024),
                                    pod=self.pod_name)
             
             return gpu_memory

@@ -12,8 +12,6 @@ class Service:
         self.service_name = f"{self.release_name}-{self.model_name_escaped}"
         self.logger = get_logger("service")
         self.v1 = client.CoreV1Api()
-        
-        self.logger.debug("Service created", model=self.model_name_full)
     
     def spawn(self):
         """
@@ -59,7 +57,6 @@ class Service:
                     name=self.service_name,
                     namespace=self.namespace
                 )
-                self.logger.warning("Service already exists, updating it", name=self.service_name)
                 
                 # Patch metadata and spec
                 body = client.V1Service(
@@ -74,8 +71,7 @@ class Service:
                     body=body
                 )
                 
-                self.logger.debug("Service patched successfully",
-                                 name=self.service_name)
+                self.logger.warning("Updated existing Service", name=self.service_name)
                 return
             
             except client.exceptions.ApiException as e:
@@ -95,12 +91,12 @@ class Service:
                 body=service
             )
             
-            self.logger.info("Service created successfully",
+            self.logger.info("Spawned new Service",
                              name=self.service_name,
                              ports=[p.name for p in ports])
         
         except Exception as e:
-            self.logger.error("Failed to create or patch Service",
+            self.logger.error("Failed to create or update Service",
                               model=self.service_name,
                               error=str(e))
             raise
