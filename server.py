@@ -77,9 +77,6 @@ class Server:
                         raise
                     time.sleep(0.1)
             except Exception as e:
-                self.logger.debug("Port-forward terminated", 
-                                 error=str(e),
-                                 pod=self.pod_name)
                 port_queue.put(None)
         
         pf_thread = threading.Thread(target=port_forward, daemon=True)
@@ -182,7 +179,7 @@ class Server:
                     }
                     self.logger.debug("Model is in repository but not loaded to the server", 
                                    model=model_name,
-                                   version=model_version,
+                                   version=model_version or "unknown",
                                    pod=self.pod_name)
             
             # Count only READY models
@@ -246,8 +243,11 @@ class Server:
                 for version in loaded_versions:
                     self.add_label(f"{model_name}-v{version}")
                 
-                self.logger.info(f"Model loaded successfully with {len(loaded_versions)} versions", 
+                self.logger.info(f"Model loaded successfully", 
                                model=model_name,
+                               version_count=len(loaded_versions),
+
+
                                pod=self.pod_name)
             else:
                 # First remove labels, then unload the model
@@ -302,7 +302,7 @@ class Server:
         Format: sonic.model.loaded/modelname-v1: true
         """
         label_key = format_model_label(model_name)
-        self.logger.info("Adding model label to server", 
+        self.logger.info("Adding model label to pod", 
                         label=label_key,
                         pod=self.pod_name)
         
@@ -340,7 +340,7 @@ class Server:
         Remove a label from the Triton server
         """
         label_key = format_model_label(model_name)
-        self.logger.info("Removing model label from server", 
+        self.logger.info("Removing model label from pod", 
                         label=label_key,
                         pod=self.pod_name)
         

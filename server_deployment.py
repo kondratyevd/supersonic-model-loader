@@ -31,7 +31,7 @@ class ServerDeployment:
                 namespace=self.namespace
             )
             
-            self.logger.info("Deployment retrieved successfully", 
+            self.logger.info("Deployment retrieved", 
                            name=deployment_name,
                            available_replicas=deployment.status.available_replicas,
                            ready_replicas=deployment.status.ready_replicas,

@@ -58,7 +58,7 @@ class Service:
                     name=self.service_name,
                     namespace=self.namespace
                 )
-                self.logger.warning("Service already exists, patching it", name=self.service_name)
+                self.logger.warning("Service already exists, updating it", name=self.service_name)
                 
                 # Patch metadata and spec
                 body = client.V1Service(

@@ -1,71 +1,46 @@
-import structlog
 import sys
 import logging
-import time
-from typing import Any, Dict
+import structlog
+
 from structlog.dev import ConsoleRenderer
-from structlog.processors import TimeStamper
+from structlog.processors import TimeStamper, format_exc_info, add_log_level
+from structlog.stdlib import LoggerFactory, BoundLogger
 
-# Default log level
-DEFAULT_LOG_LEVEL = logging.INFO
+_RESET       = "\x1b[0m"
+_BOLD        = "\x1b[1m"
+_DIM         = "\x1b[2m"
+_FG_GREEN    = "\x1b[32m"
+_FG_CYAN     = "\x1b[36m"
 
-# Configure which loggers to show
-LOGGER_LEVELS = {
-    "supersonic.app": logging.INFO,
-    "supersonic.server": logging.INFO,
-    "supersonic.service": logging.INFO,
-    "supersonic.main": logging.INFO,
-}
+def configure_structlog(debug: bool = False) -> None:
 
-class LoggerFilter(logging.Filter):
-    def filter(self, record):
-        # Get the logger name without the 'supersonic.' prefix
-        logger_name = record.name.replace('supersonic.', '')
-        
-        # Check if we have a specific level for this logger
-        if record.name in LOGGER_LEVELS:
-            return record.levelno >= LOGGER_LEVELS[record.name]
-        
-        # Default to INFO level for unknown loggers
-        return record.levelno >= DEFAULT_LOG_LEVEL
+    app_log = logging.getLogger("supersonic")
+    app_log.setLevel(logging.DEBUG if debug else logging.INFO)
+    if not app_log.handlers:
+        h = logging.StreamHandler(sys.stdout)
+        h.setFormatter(logging.Formatter("%(message)s"))
+        app_log.addHandler(h)
 
-# First, configure the standard library logging
-logging.basicConfig(
-    format="%(message)s",
-    stream=sys.stdout,
-    level=DEFAULT_LOG_LEVEL,
-)
+    # 2) Build a custom level_styles map
+    default_styles = ConsoleRenderer.get_default_level_styles(colors=True)
+    custom_styles = {
+        **default_styles,
+        # override just debug and info
+        "debug": _DIM + _FG_CYAN,
+        "info":  _BOLD + _FG_GREEN,
+    }
+    structlog.configure(
+        processors=[
+            add_log_level,                # adds the log level to each event
+            TimeStamper(fmt="%Y-%m-%d %H:%M:%S", utc=False),
+            format_exc_info,              # format exception info if provided
+            structlog.dev.ConsoleRenderer(pad_event=30, level_styles=custom_styles),
+        ],
+        logger_factory=LoggerFactory(),
+        wrapper_class=BoundLogger,
+        cache_logger_on_first_use=True,
+    )
 
-# Add our filter
-logging.getLogger().addFilter(LoggerFilter())
-
-# Configure structlog
-structlog.configure(
-    processors=[
-        structlog.stdlib.add_log_level,
-        TimeStamper(fmt="%H:%M:%S"),
-        structlog.processors.format_exc_info,
-        structlog.processors.UnicodeDecoder(),
-        structlog.dev.ConsoleRenderer(colors=True, pad_event=25),
-    ],
-    logger_factory=structlog.PrintLoggerFactory(),
-    wrapper_class=structlog.make_filtering_bound_logger(DEFAULT_LOG_LEVEL),
-    cache_logger_on_first_use=True,
-)
-
-def get_logger(name: str) -> structlog.BoundLogger:
-    """
-    Get a logger instance with the specified name.
-    Returns a bound logger that can be used for structured logging.
-    
-    Example usage:
-        logger = get_logger("app")
-        logger.info("event_name", 
-                   model_name="model1", 
-                   status="success",
-                   extra_field="value")
-    """
+def get_logger(name: str) -> BoundLogger:
+    # namespaced under "supersonic"
     return structlog.get_logger(f"supersonic.{name}")
-
-# Create a default logger for direct use
-logger = get_logger("root") 

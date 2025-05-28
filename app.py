@@ -1,8 +1,9 @@
 from server_deployment import ServerDeployment
 from kubernetes import config
-from logger import get_logger
+from logger import get_logger, configure_structlog
 from service_discovery import Service
 import yaml
+import argparse
 
 # Load configuration from config.yaml
 with open('config.yaml', 'r') as f:
@@ -44,6 +45,17 @@ class App:
         return server_deployment.get_servers()
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description='Triton server model loader')
+    parser.add_argument('--config', type=str, default='config.yaml',
+                      help='Path to config file')
+    parser.add_argument('-d', '--debug', action='store_true',
+                      help='Enable debug logging')
+    args = parser.parse_args()
+
+    # Set global debug mode
+    configure_structlog(args.debug)
+    
+    # Get logger (will use global debug mode)
     logger = get_logger("main")
     logger.info("Starting application", 
                 release=release_name,
@@ -59,10 +71,10 @@ if __name__ == "__main__":
         # server.sync_labels()
         # server.remove_label("deepmet-v1")
         if i==0:
-            server.logger.warning("Will unload deepmet model from this server", pod=server.pod_name)
+            server.logger.warning("Will unload model from this server", pod=server.pod_name, model="deepmet")
             server.unload_model("deepmet")
         else:
-            server.logger.warning("Will load deepmet model into this server", pod=server.pod_name)
+            server.logger.warning("Will load model into this server", pod=server.pod_name, model="deepmet")
             server.load_model("deepmet")
 
     for server in servers:
