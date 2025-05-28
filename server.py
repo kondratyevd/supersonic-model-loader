@@ -1,7 +1,6 @@
-from utils import format_model_label, escape_model_name, find_free_port
+from utils import format_model_label, find_free_port
 from logger import get_logger
 from kubernetes import client
-import grpc
 import tritonclient.grpc as grpcclient
 from tritonclient.grpc import InferenceServerClient
 from typing import Dict
@@ -28,7 +27,6 @@ class Server:
 
         atexit.register(self.cleanup_port_forward)
 
-        # Get release name from pod labels
         self.release_name = self.pod.metadata.labels.get("app.kubernetes.io/instance", "supersonic-test")
 
     def refresh_pod(self):
@@ -83,9 +81,7 @@ class Server:
             raise
 
     def setup_port_forward(self, remote_port: int) -> int:
-        """
-        Set up port-forwarding to the server pod.
-        """
+        """Set up port-forwarding to the server pod."""
         port_queue = queue.Queue()
         
         def port_forward():
@@ -160,9 +156,7 @@ class Server:
             self.port_forward_remote_port = None
 
     def get_triton_client(self, port: int) -> InferenceServerClient:
-        """
-        Create a Triton gRPC client.
-        """
+        """Create a Triton gRPC client."""
         try:
             client = grpcclient.InferenceServerClient(
                 url=f"localhost:{port}",
@@ -235,9 +229,7 @@ class Server:
             self.cleanup_port_forward()
 
     def count_versions(self, model_name: str, client: InferenceServerClient, state: str = None) -> list:
-        """
-        Count versions of a model in the repository.
-        """
+        """Count versions of a model in the repository."""
         repository_index = client.get_model_repository_index()
         versions = []
         
@@ -249,9 +241,7 @@ class Server:
         return versions
 
     def load_or_unload_model(self, model_name: str, load: bool):
-        """
-        Load or unload a model into the Triton server
-        """
+        """Load or unload a model into the Triton server"""
         action = "load" if load else "unload"
         try:
             local_port = self.setup_port_forward(8001)  # gRPC port
@@ -306,9 +296,7 @@ class Server:
         self.load_or_unload_model(model_name, load=False)
 
     def has_label(self, model_name: str) -> bool:
-        """
-        Check if a model label exists on the pod.
-        """
+        """Check if a model label exists on the pod."""
         label_key = format_model_label(model_name)
         
         try:
@@ -373,9 +361,7 @@ class Server:
             raise
 
     def remove_label(self, model_name: str):
-        """
-        Remove a label from the Triton server
-        """
+        """Remove a label from the Triton server"""
         label_key = format_model_label(model_name)
         
         try:

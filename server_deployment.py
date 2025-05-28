@@ -15,10 +15,6 @@ class ServerDeployment:
     def get_deployment(self):
         """
         Get the deployment by name in the specified namespace
-        Returns:
-            V1Deployment: The deployment object if found
-        Raises:
-            ApiException: If the deployment is not found or other API errors occur
         """
         deployment_name = f"{self.release_name}-triton"
         self.logger.info("Fetching deployment", 
@@ -55,8 +51,6 @@ class ServerDeployment:
     def get_servers(self) -> List['Server']:
         """
         Get all Triton server pods in the deployment
-        Returns:
-            List[Server]: List of Server objects representing each pod
         """
         deployment_name = f"{self.release_name}-triton"
         self.logger.info("Fetching server pods", 
@@ -90,10 +84,6 @@ class ServerDeployment:
     def scale(self, replicas: int):
         """
         Scale the number of Triton servers in the deployment
-        Args:
-            replicas (int): The desired number of replicas
-        Raises:
-            ApiException: If scaling fails
         """
         deployment_name = f"{self.release_name}-triton"
         self.logger.info("Scaling deployment", 

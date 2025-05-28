@@ -14,9 +14,7 @@ class Service:
         self.v1 = client.CoreV1Api()
     
     def spawn(self):
-        """
-        Spawn (or update) a headless Kubernetes Service
-        """
+        """Spawn (or update) a headless Kubernetes Service"""
         self.logger.info("Spawning Service", model=self.model_name_full)
         
         try:

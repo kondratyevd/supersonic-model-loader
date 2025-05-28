@@ -2,12 +2,7 @@ import re
 import socket
 
 def find_free_port() -> int:
-    """
-    Find a free port on the local machine.
-    
-    Returns:
-        int: A free port number
-    """
+    """Find a free port on the local machine."""
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(('', 0))
         s.listen(1)

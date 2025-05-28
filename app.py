@@ -40,9 +40,6 @@ class App:
         self.triton_deployment = ServerDeployment(self.release_name, self.namespace)
     
     def get_servers(self):
-        """
-        Use kubectl to find any existing Triton servers
-        """
         self.get_triton_deployment()
         return self.triton_deployment.get_servers()
 
@@ -53,9 +50,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     # Set global debug mode
-    configure_structlog(args.debug)
-    
-    # Get logger (will use global debug mode)
+    configure_structlog(args.debug)    
     logger = get_logger("main")
     logger.info("Starting application", 
                 release=release_name,
