@@ -1,4 +1,18 @@
 import re
+import socket
+
+def find_free_port() -> int:
+    """
+    Find a free port on the local machine.
+    
+    Returns:
+        int: A free port number
+    """
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(('', 0))
+        s.listen(1)
+        port = s.getsockname()[1]
+    return port
 
 def parse_model_name(full_name: str) -> tuple[str, str]:
     """

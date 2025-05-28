@@ -7,9 +7,9 @@ import yaml
 # Load configuration from config.yaml
 with open('config.yaml', 'r') as f:
     config_data = yaml.safe_load(f)
-    release_name = config_data.get('release_name', 'supersonic-test')
+    release_name = config_data.get('release_name', 'supersonic')
     namespace = config_data.get('namespace', 'cms')
-    models = config_data.get('models', ['deepmet-v1', 'higgsinteractionnet-v1'])
+    models = config_data.get('models', ['deepmet-v1'])
 
 class App:
     def __init__(self, release_name: str, namespace: str):

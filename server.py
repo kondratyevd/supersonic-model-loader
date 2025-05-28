@@ -1,21 +1,23 @@
-from utils import format_model_label, escape_model_name
+from utils import format_model_label, escape_model_name, find_free_port
 from logger import get_logger
-from kubernetes import client, config
+from kubernetes import client
 import requests
-from typing import Dict, List, Optional
-import threading
-import queue
-import time
+from typing import Dict
+import atexit
+import json
 import subprocess
 import os
 import signal
-import atexit
-import json
+import time
+import queue
+import threading
 
 class Server:
     def __init__(self, pod):
         self.logger = get_logger("server")
         self.pod = pod
+        self.pod_name = pod.metadata.name
+        self.pod_namespace = pod.metadata.namespace
         self.v1 = client.CoreV1Api()
         self.port_forward_process = None
         atexit.register(self.cleanup_port_forward)
@@ -23,114 +25,106 @@ class Server:
         # Get release name from pod labels
         self.release_name = self.pod.metadata.labels.get("app.kubernetes.io/instance", "supersonic-test")
 
+    def setup_port_forward(self, remote_port: int) -> int:
+        """
+        Set up port-forwarding to the pod.
+        """
+        port_queue = queue.Queue()
+        
+        def port_forward():
+            try:
+                # Find a free port
+                free_port = find_free_port()
+                
+                cmd = [
+                    "kubectl", "port-forward",
+                    f"pod/{self.pod_name}",
+                    f"{free_port}:{remote_port}",
+                    "-n", self.pod_namespace
+                ]
+                
+                self.port_forward_process = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    preexec_fn=os.setsid
+                )
+                
+                time.sleep(2)
+                
+                if self.port_forward_process.poll() is not None:
+                    stderr = self.port_forward_process.stderr.read().decode()
+                    raise Exception(f"Port-forward failed: {stderr}")
+                
+                port_queue.put((free_port, self.port_forward_process))
+                
+                while True:
+                    if self.port_forward_process.poll() is not None:
+                        stderr = self.port_forward_process.stderr.read().decode()
+                        raise Exception(f"Port-forward terminated: {stderr}")
+                    time.sleep(0.1)
+            except Exception as e:
+                self.logger.warning("Port-forwarding terminated", 
+                                    error=str(e),
+                                    pod=self.pod_name)
+                port_queue.put(None)
+        
+        pf_thread = threading.Thread(target=port_forward, daemon=True)
+        pf_thread.start()
+        
+        result = port_queue.get()
+        if result is None:
+            raise Exception("Failed to establish port-forwarding")
+        
+        local_port, process = result
+        self.logger.info("Port-forwarding established", 
+                       pod=self.pod_name,
+                       local_port=local_port)
+        
+        return local_port
+
     def cleanup_port_forward(self):
         """Clean up port-forward process if it exists"""
         if self.port_forward_process:
             try:
                 os.killpg(os.getpgid(self.port_forward_process.pid), signal.SIGTERM)
+                self.logger.info("Port-forwarding cleaned up")
             except:
                 pass
+            self.port_forward_process = None
+
+    def query_triton_server(self, url: str) -> requests.Response:
+        """
+        Query the Triton server API.
+        """
+        headers = {
+            'Content-Type': 'application/json',
+            'Accept': 'application/json'
+        }
+        
+        response = requests.post(
+            url,
+            headers=headers
+        )
+        response.raise_for_status()
+        return response
 
     def get_models(self) -> Dict[str, Dict]:
         """
         Get the models loaded on the Triton Inference Server API.
         Uses kubectl port-forward for direct pod access.
-        
-        Returns:
-            Dict[str, Dict]: Dictionary containing model information with the following structure:
-            {
-                "model_name": {
-                    "name": str,
-                    "version": str,
-                    "state": str,
-                    "status": Dict
-                }
-            }
         """
         self.logger.info("Querying Triton server for loaded models", 
-                        pod=self.pod.metadata.name)
+                        pod=self.pod_name)
         
         try:
-            # Create a queue to receive the port number
-            port_queue = queue.Queue()
+            local_port = self.setup_port_forward(8000)
             
-            # Start port-forwarding in a separate thread
-            def port_forward():
-                try:
-                    # Use kubectl port-forward
-                    cmd = [
-                        "kubectl", "port-forward",
-                        f"pod/{self.pod.metadata.name}",
-                        "8000:8000",
-                        "-n", self.pod.metadata.namespace
-                    ]
-                    
-                    # Start the process in a new process group
-                    self.port_forward_process = subprocess.Popen(
-                        cmd,
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.PIPE,
-                        preexec_fn=os.setsid
-                    )
-                    
-                    # Wait a moment for the port-forward to establish
-                    time.sleep(2)
-                    
-                    # Check if process is still running
-                    if self.port_forward_process.poll() is not None:
-                        stderr = self.port_forward_process.stderr.read().decode()
-                        raise Exception(f"Port-forward failed: {stderr}")
-                    
-                    # Use localhost:8000
-                    port_queue.put(8000)
-                    
-                    # Keep the connection open
-                    while True:
-                        if self.port_forward_process.poll() is not None:
-                            stderr = self.port_forward_process.stderr.read().decode()
-                            raise Exception(f"Port-forward terminated: {stderr}")
-                        time.sleep(0.1)
-                except Exception as e:
-                    self.logger.warning("Port-forwarding terminated", 
-                                    pod=self.pod.metadata.name)
-                    port_queue.put(None)
-            
-            # Start port-forwarding thread
-            pf_thread = threading.Thread(target=port_forward, daemon=True)
-            pf_thread.start()
-            
-            # Wait for the port number
-            local_port = port_queue.get()
-            if local_port is None:
-                raise Exception("Failed to establish port-forwarding")
-            
-            self.logger.info("Port-forwarding established", 
-                           pod=self.pod.metadata.name,
-                           local_port=local_port)
-            
-            # Use localhost with the forwarded port
             base_url = f"http://localhost:{local_port}"
             
-            # Set up common headers for Triton API
-            headers = {
-                'Content-Type': 'application/json',
-                'Accept': 'application/json'
-            }
-            
-            # Query Triton model repository status
-            response = requests.post(
-                f"{base_url}/v2/repository/index",
-                headers=headers
-            )
-            response.raise_for_status()
-            
-            # Log raw response for debugging
-            self.logger.debug("Raw repository index response", 
-                            status_code=response.status_code,
-                            content=response.text)
+            response = self.query_triton_server(f"{base_url}/v2/repository/index")
             
             try:
-                # The response is a list of model information dictionaries
                 models_data = response.json()
             except json.JSONDecodeError as e:
                 self.logger.error("Invalid JSON response from repository index", 
@@ -138,40 +132,21 @@ class Server:
                                 content=response.text)
                 raise
             
-            self.logger.debug("Received model data from repository", 
-                            models_data=models_data)
-            
-            models_info = {}
-            
-            # Process each model in the repository
             for model_data in models_data:
                 if not isinstance(model_data, dict):
                     self.logger.warning("Skipping invalid model data", 
-                                      model_data=model_data)
+                                       model_data=model_data)
                     continue
                 
                 model_name = model_data.get('name')
                 if not model_name:
                     self.logger.warning("Skipping model with no name", 
-                                      model_data=model_data)
+                                       model_data=model_data)
                     continue
                 
-                # Get detailed model status
-                status_response = requests.get(
-                    f"{base_url}/v2/models/{model_name}/ready",
-                    headers=headers
-                )
-                status_response.raise_for_status()
-                
-                # The ready endpoint returns a boolean value directly
+                status_response = self.query_triton_server(f"{base_url}/v2/models/{model_name}/ready")                
                 is_ready = status_response.text.lower() == 'true'
-                
-                # Get model config
-                config_response = requests.get(
-                    f"{base_url}/v2/models/{model_name}/config",
-                    headers=headers
-                )
-                config_response.raise_for_status()
+                config_response = self.query_triton_server(f"{base_url}/v2/models/{model_name}/config")
                 
                 try:
                     config_data = config_response.json()
@@ -186,32 +161,25 @@ class Server:
                     "name": model_name,
                     "version": model_data.get("version", config_data.get("version", "unknown")),
                     "state": model_data.get("state", "READY" if is_ready else "UNAVAILABLE"),
-                    # "status": {"ready": is_ready},
-                    # "config": config_data
                 }
                 
                 self.logger.info("Model information retrieved", 
                                model=model_name,
                                version=self.triton_models_info[model_name]["version"],
                                state=self.triton_models_info[model_name]["state"],
-                               pod=self.pod.metadata.name)
-            
-            self.logger.info("Successfully retrieved model information", 
-                           count=len(self.triton_models_info),
-                           pod=self.pod.metadata.name)
+                               pod=self.pod_name)
             
         except requests.exceptions.RequestException as e:
             self.logger.error("Failed to query Triton server API", 
                             error=str(e),
-                            pod=self.pod.metadata.name)
+                            pod=self.pod_name)
             raise
         except Exception as e:
             self.logger.error("Unexpected error while getting models", 
                             error=str(e),
-                            pod=self.pod.metadata.name)
+                            pod=self.pod_name)
             raise
         finally:
-            # Clean up port-forward process
             self.cleanup_port_forward()
     
     def sync_labels(self):
@@ -219,7 +187,7 @@ class Server:
         Sync the labels on the Triton server with the labels on the local pod
         """
         self.logger.info("Starting label sync for models", 
-                        pod=self.pod.metadata.name,
+                        pod=self.pod_name,
                         model_count=len(self.triton_models_info))
         
         for model_name, model_info in self.triton_models_info.items():
@@ -234,7 +202,7 @@ class Server:
                 self.remove_label(model_name_full)
                 
         self.logger.info("Completed label sync for all models",
-                        pod=self.pod.metadata.name)
+                        pod=self.pod_name)
 
     def add_label(self, model_name: str):
         """
@@ -243,9 +211,8 @@ class Server:
         """
         label_key = format_model_label(model_name)
         self.logger.info("Adding model label to server", 
-                        # model=model_name,
                         label=label_key,
-                        pod=self.pod.metadata.name)
+                        pod=self.pod_name)
         
         try:
             # Check if label already exists
@@ -253,7 +220,7 @@ class Server:
                 self.logger.warning("Model label already exists", 
                                   model=model_name,
                                   label=label_key,
-                                  pod=self.pod.metadata.name)
+                                  pod=self.pod_name)
                 return
             
             # Add the new label
@@ -264,8 +231,8 @@ class Server:
             
             # Update the pod
             self.v1.patch_namespaced_pod(
-                name=self.pod.metadata.name,
-                namespace=self.pod.metadata.namespace,
+                name=self.pod_name,
+                namespace=self.pod_namespace,
                 body={"metadata": {"labels": self.pod.metadata.labels}}
             )
             
@@ -273,7 +240,7 @@ class Server:
             self.logger.error("Failed to add model label", 
                             model=model_name,
                             error=str(e),
-                            pod=self.pod.metadata.name)
+                            pod=self.pod_name)
             raise
 
     def remove_label(self, model_name: str):
@@ -282,15 +249,14 @@ class Server:
         """
         label_key = format_model_label(model_name)
         self.logger.info("Removing model label from server", 
-                        # model=model_name,
                         label=label_key,
-                        pod=self.pod.metadata.name)
+                        pod=self.pod_name)
         
         try:
             # Get fresh pod data to ensure we have current labels
             current_pod = self.v1.read_namespaced_pod(
-                name=self.pod.metadata.name,
-                namespace=self.pod.metadata.namespace
+                name=self.pod_name,
+                namespace=self.pod_namespace
             )
             
             if current_pod.metadata.labels and label_key in current_pod.metadata.labels:
@@ -300,8 +266,8 @@ class Server:
                 
                 # Update the pod with new labels
                 self.v1.patch_namespaced_pod(
-                    name=self.pod.metadata.name,
-                    namespace=self.pod.metadata.namespace,
+                    name=self.pod_name,
+                    namespace=self.pod_namespace,
                     body={"metadata": {"labels": new_labels}}
                 )
 
@@ -309,135 +275,31 @@ class Server:
                 self.logger.warning("Model label not found", 
                                   model=model_name,
                                   label=label_key,
-                                  pod=self.pod.metadata.name)
+                                  pod=self.pod_name)
                 
         except Exception as e:
             self.logger.error("Failed to remove model label", 
                             model=model_name,
                             error=str(e),
-                            pod=self.pod.metadata.name)
-            raise
-
-    def find_label(self, model_name: str) -> bool:
-        """
-        Check if Triton server has a model label
-        Returns:
-            bool: True if the label exists, False otherwise
-        """
-        label_key = format_model_label(model_name)
-        self.logger.debug("Checking for model label", 
-                         model=model_name,
-                         label=label_key,
-                         pod=self.pod.metadata.name)
-        
-        try:
-            has_label = (self.pod.metadata.labels is not None and 
-                        label_key in self.pod.metadata.labels and 
-                        self.pod.metadata.labels[label_key] == "true")
-            
-            self.logger.debug("Model label check completed", 
-                            model=model_name,
-                            label=label_key,
-                            found=has_label,
-                            pod=self.pod.metadata.name)
-            
-            return has_label
-            
-        except Exception as e:
-            self.logger.error("Failed to check model label", 
-                            model=model_name,
-                            error=str(e),
-                            pod=self.pod.metadata.name)
+                            pod=self.pod_name)
             raise
 
     def get_gpu_memory(self) -> Dict[str, Dict[str, int]]:
         """
         Get GPU memory information from the Triton server.
-        
-        Returns:
-            Dict[str, Dict[str, int]]: Dictionary containing GPU memory information:
-            {
-                "gpu_uuid": {
-                    "total_memory": int,  # Total memory in bytes
-                    "free_memory": int,   # Free memory in bytes
-                    "used_memory": int    # Used memory in bytes
-                }
-            }
         """
         self.logger.info("Querying GPU memory information", 
-                        pod=self.pod.metadata.name)
+                        pod=self.pod_name)
         
         try:
-            # Create a queue to receive the port number
-            port_queue = queue.Queue()
+            local_port = self.setup_port_forward(8002)
             
-            # Start port-forwarding in a separate thread
-            def port_forward():
-                try:
-                    # Use kubectl port-forward
-                    cmd = [
-                        "kubectl", "port-forward",
-                        f"pod/{self.pod.metadata.name}",
-                        "8002:8002",
-                        "-n", self.pod.metadata.namespace
-                    ]
-                    
-                    # Start the process in a new process group
-                    self.port_forward_process = subprocess.Popen(
-                        cmd,
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.PIPE,
-                        preexec_fn=os.setsid
-                    )
-                    
-                    # Wait a moment for the port-forward to establish
-                    time.sleep(2)
-                    
-                    # Check if process is still running
-                    if self.port_forward_process.poll() is not None:
-                        stderr = self.port_forward_process.stderr.read().decode()
-                        raise Exception(f"Port-forward failed: {stderr}")
-                    
-                    # Use localhost:8002
-                    port_queue.put(8002)
-                    
-                    # Keep the connection open
-                    while True:
-                        if self.port_forward_process.poll() is not None:
-                            stderr = self.port_forward_process.stderr.read().decode()
-                            raise Exception(f"Port-forward terminated: {stderr}")
-                        time.sleep(0.1)
-                except Exception as e:
-                    self.logger.warning("Port-forwarding terminated", 
-                                      pod=self.pod.metadata.name)
-                    port_queue.put(None)
-            
-            # Start port-forwarding thread
-            pf_thread = threading.Thread(target=port_forward, daemon=True)
-            pf_thread.start()
-            
-            # Wait for the port number
-            local_port = port_queue.get()
-            if local_port is None:
-                raise Exception("Failed to establish port-forwarding")
-            
-            self.logger.info("Port-forwarding established", 
-                           pod=self.pod.metadata.name,
-                           local_port=local_port)
-            
-            # Use localhost with the forwarded port
             base_url = f"http://localhost:{local_port}"
             
-            # Query Triton metrics endpoint
-            response = requests.get(
-                f"{base_url}/metrics",
-                headers={'Accept': 'text/plain'}
-            )
-            response.raise_for_status()
+            response = self.query_triton_server(f"{base_url}/metrics")
             
             gpu_memory = {}
-            
-            # Parse Prometheus format metrics
+
             for line in response.text.split('\n'):
                 # Skip comments and empty lines
                 if line.startswith('#') or not line.strip():
@@ -449,7 +311,6 @@ class Server:
                     metric_name, value = line.split(' ', 1)
                     value = float(value)
                     
-                    # Extract labels
                     labels = {}
                     if '{' in metric_name:
                         name, label_str = metric_name.split('{', 1)
@@ -483,7 +344,7 @@ class Server:
                             self.logger.debug(f"GPU {metric_name}", 
                                            gpu_uuid=gpu_uuid,
                                            value=value,
-                                           pod=self.pod.metadata.name)
+                                           pod=self.pod_name)
                 
                 except Exception as e:
                     self.logger.warning("Failed to parse metric line", 
@@ -505,20 +366,19 @@ class Server:
                                    total_mb=gpu_memory[gpu_uuid]['total_memory'] // (1024 * 1024),
                                    used_mb=gpu_memory[gpu_uuid]['used_memory'] // (1024 * 1024),
                                    free_mb=gpu_memory[gpu_uuid]['free_memory'] // (1024 * 1024),
-                                   pod=self.pod.metadata.name)
+                                   pod=self.pod_name)
             
             return gpu_memory
             
         except requests.exceptions.RequestException as e:
             self.logger.error("Failed to query Triton metrics API", 
                             error=str(e),
-                            pod=self.pod.metadata.name)
+                            pod=self.pod_name)
             raise
         except Exception as e:
             self.logger.error("Unexpected error while getting GPU memory", 
                             error=str(e),
-                            pod=self.pod.metadata.name)
+                            pod=self.pod_name)
             raise
         finally:
-            # Clean up port-forward process
             self.cleanup_port_forward()
