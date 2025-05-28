@@ -77,7 +77,7 @@ class Server:
                         raise
                     time.sleep(0.1)
             except Exception as e:
-                self.logger.warning("Port-forwarding terminated", 
+                self.logger.debug("Port-forward terminated", 
                                  error=str(e),
                                  pod=self.pod_name)
                 port_queue.put(None)
@@ -89,7 +89,7 @@ class Server:
         if local_port is None:
             raise Exception("Failed to establish port-forwarding")
         
-        self.logger.info("Port-forwarding established", 
+        self.logger.debug("Port-forwarding established", 
                        pod=self.pod_name,
                        local_port=local_port,
                        remote_port=remote_port)
@@ -103,7 +103,7 @@ class Server:
         if self.port_forward_process:
             try:
                 os.killpg(os.getpgid(self.port_forward_process.pid), signal.SIGTERM)
-                self.logger.info("Port-forwarding cleaned up",
+                self.logger.debug("Port-forwarding cleaned up",
                                  local_port=self.port_forward_local_port,
                                  remote_port=self.port_forward_remote_port)
             except:
@@ -139,7 +139,7 @@ class Server:
         Get the models loaded on the Triton Inference Server API.
         Uses kubectl port-forward for direct pod access.
         """
-        self.logger.info("Querying Triton server for loaded models", 
+        self.logger.debug("Querying Triton server for loaded models", 
                         pod=self.pod_name)
         
         try:
@@ -152,6 +152,8 @@ class Server:
             # Process each model in the repository
             for model in repository_index.models:
                 model_name = model.name
+                model_version = model.version
+                model_name_full = f"{model_name}-v{model_version}"
                 
                 # First check if model is ready
                 is_ready = client.is_model_ready(model_name)
@@ -160,28 +162,37 @@ class Server:
                     # Only get config for ready models
                     model_config = client.get_model_config(model_name)
                     
-                    self.triton_models_info[model_name] = {
+                    self.triton_models_info[model_name_full] = {
                         "name": model_name,
-                        "version": model.version,
+                        "version": model_version,
                         "state": model.state,
                     }
                     
-                    self.logger.info("Model information retrieved", 
+                    self.logger.debug("Model information retrieved", 
                                    model=model_name,
-                                   version=self.triton_models_info[model_name]["version"],
-                                   state=self.triton_models_info[model_name]["state"],
+                                   version=model_version,
+                                   state=model.state,
                                    pod=self.pod_name)
                 else:
                     # Model is in repository but not loaded
-                    self.triton_models_info[model_name] = {
+                    self.triton_models_info[model_name_full] = {
                         "name": model_name,
-                        "version": model.version,
+                        "version": model_version,
                         "state": "UNAVAILABLE",
                     }
-                    self.logger.info("Model is in repository but not loaded to the server", 
+                    self.logger.debug("Model is in repository but not loaded to the server", 
                                    model=model_name,
-                                   version=model.version,
+                                   version=model_version,
                                    pod=self.pod_name)
+            
+            # Count only READY models
+            ready_models_count = sum(1 for info in self.triton_models_info.values() 
+                                   if info["state"] == "READY")
+            
+            self.logger.info("Model information retrieved", 
+                           pod=self.pod_name,
+                           ready_model_count=ready_models_count,
+                           total_model_count=len(self.triton_models_info))
             
         except Exception as e:
             self.logger.error("Failed to query Triton server", 
@@ -191,32 +202,63 @@ class Server:
         finally:
             self.cleanup_port_forward()
 
-    def unload_model(self, model_name: str):
+    def load_or_unload_model(self, model_name: str, load: bool):
         """
-        Unload a model from the Triton server
+        Load or unload a model into the Triton server
         """
-        self.logger.info("Unloading model", 
-                        model=model_name,
-                        pod=self.pod_name)
-        
+        action = "load" if load else "unload"
         try:
             local_port = self.setup_port_forward(8001)  # gRPC port
             client = self.get_triton_client(local_port)
             
-            # Unload the model
-            client.unload_model(model_name)
+            # Get repository index to find all versions
+            repository_index = client.get_model_repository_index()
+            model_versions = []
             
-            self.logger.info("Model unloaded successfully", 
+            # Find all versions of the model
+            for model in repository_index.models:
+                if model.name == model_name:
+                    model_versions.append(model.version)
+            
+            if not model_versions:
+                self.logger.error(f"Model not found in repository", 
+                                 pod=self.pod_name,
+                                 model_name=model_name)
+                raise
+
+            self.logger.info(f"Found {len(model_versions)} versions of model {model_name} in repository", 
+                             pod=self.pod_name)
+            
+            if load:
+                # First load the model, then add labels
+                client.load_model(model_name)
+                for version in model_versions:
+                    self.add_label(f"{model_name}-v{version}")
+            else:
+                # First remove labels, then unload the model
+                for version in model_versions:
+                    self.remove_label(f"{model_name}-v{version}")
+                client.unload_model(model_name)
+
+            self.logger.info(f"Model {action}ed successfully", 
                            model=model_name,
+                           version_count=len(model_versions),
                            pod=self.pod_name)
+            
         except Exception as e:
-            self.logger.error("Failed to unload model", 
+            self.logger.error(f"Failed to {action} model", 
                             model=model_name,
                             error=str(e),
                             pod=self.pod_name)
             raise
         finally:
             self.cleanup_port_forward()
+
+    def load_model(self, model_name: str):
+        self.load_or_unload_model(model_name, load=True)
+
+    def unload_model(self, model_name: str):
+        self.load_or_unload_model(model_name, load=False)
 
     def sync_labels(self):
         """

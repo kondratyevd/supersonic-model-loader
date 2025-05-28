@@ -54,11 +54,20 @@ if __name__ == "__main__":
     app.init_services(models)
 
     servers = app.get_servers()
-    for server in servers:
+    for i, server in enumerate(servers):
+        server.logger.info(f"Processing server {i}", pod=server.pod_name)
         # server.sync_labels()
-        server.unload_model("deepmet")
+        # server.unload_model("deepmet")
+        if i==0:
+            server.logger.warning("Will unload deepmet model from this server", pod=server.pod_name)
+            server.unload_model("deepmet")
+        else:
+            server.logger.warning("Will load deepmet model into this server", pod=server.pod_name)
+            server.load_model("deepmet")
+
+    for server in servers:
         server.get_models()
 
         # print(server.get_gpu_memory())
 
-    logger.info("Application startup completed")
+    logger.info("Done!")
