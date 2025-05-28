@@ -9,8 +9,7 @@ class Service:
         self.label_key = format_model_label(model_name_full)
         self.release_name = release_name
         self.namespace = namespace
-        self.service_name = f"{self.release_name}-{self.m
-                                                   odel_name_escaped}"
+        self.service_name = f"{self.release_name}-{self.model_name_escaped}"
         self.logger = get_logger("service")
         self.v1 = client.CoreV1Api()
         
