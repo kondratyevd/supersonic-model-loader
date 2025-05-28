@@ -33,9 +33,9 @@ class ServerDeployment:
             
             self.logger.info("Deployment retrieved", 
                            name=deployment_name,
-                           available_replicas=deployment.status.available_replicas,
-                           ready_replicas=deployment.status.ready_replicas,
-                           total_replicas=deployment.spec.replicas)
+                           replicas_available=deployment.status.available_replicas,
+                           replicas_ready=deployment.status.ready_replicas,
+                           replicas_total=deployment.spec.replicas)
             
             return deployment
             
@@ -90,9 +90,39 @@ class ServerDeployment:
     def scale(self, replicas: int):
         """
         Scale the number of Triton servers in the deployment
+        Args:
+            replicas (int): The desired number of replicas
+        Raises:
+            ApiException: If scaling fails
         """
+        deployment_name = f"{self.release_name}-triton"
         self.logger.info("Scaling deployment", 
+                        deployment=deployment_name,
                         current_replicas=len(self.get_servers()),
                         target_replicas=replicas)
-        # TODO: Implement scaling logic
-        self.logger.warning("scale not implemented")
+        
+        try:
+            # Create a patch to update the replicas
+            patch = {
+                "spec": {
+                    "replicas": replicas
+                }
+            }
+            
+            # Apply the patch to scale the deployment
+            self.v1.patch_namespaced_deployment(
+                name=deployment_name,
+                namespace=self.namespace,
+                body=patch
+            )
+            
+            self.logger.info("Successfully scaled deployment",
+                           deployment=deployment_name,
+                           target_replicas=replicas)
+            
+        except ApiException as e:
+            self.logger.error("Failed to scale deployment",
+                            deployment=deployment_name,
+                            target_replicas=replicas,
+                            error=str(e))
+            raise

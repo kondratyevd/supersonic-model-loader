@@ -36,13 +36,15 @@ class App:
         self.services[model_name_full] = service
         return service
     
+    def get_triton_deployment(self):
+        self.triton_deployment = ServerDeployment(self.release_name, self.namespace)
+    
     def get_servers(self):
         """
         Use kubectl to find any existing Triton servers
         """
-        server_deployment = ServerDeployment(self.release_name, self.namespace)
-        deployment = server_deployment.get_deployment()
-        return server_deployment.get_servers()
+        self.get_triton_deployment()
+        return self.triton_deployment.get_servers()
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Triton server model loader')
@@ -65,6 +67,9 @@ if __name__ == "__main__":
     app = App(release_name, namespace)
     app.init_services(models)
 
+    # app.get_triton_deployment()
+    # app.triton_deployment.scale(2)
+
     servers = app.get_servers()
     for i, server in enumerate(servers):
         server.logger.info(f"Processing server {i}", pod=server.pod_name)
@@ -77,6 +82,6 @@ if __name__ == "__main__":
             server.logger.warning("Will load model into this server", pod=server.pod_name, model="higgsInteractionNet")
             server.load_model("higgsInteractionNet")
         # server.restart()
-        server.get_gpu_memory()
+        # server.get_gpu_memory()
 
     logger.info("Done!")
