@@ -21,11 +21,9 @@ def configure_structlog(debug: bool = False) -> None:
         h.setFormatter(logging.Formatter("%(message)s"))
         app_log.addHandler(h)
 
-    # 2) Build a custom level_styles map
     default_styles = ConsoleRenderer.get_default_level_styles(colors=True)
     custom_styles = {
         **default_styles,
-        # override just debug and info
         "debug": _DIM + _FG_CYAN,
         "info":  _BOLD + _FG_GREEN,
     }
@@ -42,5 +40,4 @@ def configure_structlog(debug: bool = False) -> None:
     )
 
 def get_logger(name: str) -> BoundLogger:
-    # namespaced under "supersonic"
     return structlog.get_logger(f"supersonic.{name}")
