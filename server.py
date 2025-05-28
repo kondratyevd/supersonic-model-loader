@@ -6,7 +6,6 @@ import tritonclient.grpc as grpcclient
 from tritonclient.grpc import InferenceServerClient
 from typing import Dict
 import atexit
-import json
 import subprocess
 import os
 import signal
@@ -28,13 +27,64 @@ class Server:
         self.port_forward_remote_port = None
 
         atexit.register(self.cleanup_port_forward)
-        self.triton_models_info = {}
+
         # Get release name from pod labels
         self.release_name = self.pod.metadata.labels.get("app.kubernetes.io/instance", "supersonic-test")
 
+    def refresh_pod(self):
+        """
+        Refresh the pod state and update class properties.
+        This ensures we have the most up-to-date pod information.
+        """
+        try:
+            self.pod = self.v1.read_namespaced_pod(
+                name=self.pod_name,
+                namespace=self.pod_namespace
+            )
+            self.logger.debug("Refreshed pod state", 
+                            pod=self.pod_name)
+        except Exception as e:
+            self.logger.error("Failed to refresh pod state",
+                            error=str(e),
+                            pod=self.pod_name)
+            raise
+
+    def restart_pod(self):
+        """
+        Restart the Triton server pod by deleting it and letting the controller create a new one.
+        This will trigger a pod restart while maintaining the same pod name.
+        """
+        try:
+            self.logger.info("Initiating pod restart", pod=self.pod_name)
+            
+            # Delete the pod
+            self.v1.delete_namespaced_pod(
+                name=self.pod_name,
+                namespace=self.pod_namespace
+            )
+            
+            # Wait for the pod to be recreated and become ready
+            while True:
+                try:
+                    self.refresh_pod()
+                    if self.pod.status.phase == "Running":
+                        self.logger.info("Pod successfully restarted", pod=self.pod_name)
+                        break
+                except Exception as e:
+                    self.logger.debug("Waiting for pod to be recreated", 
+                                    error=str(e),
+                                    pod=self.pod_name)
+                time.sleep(1)
+                
+        except Exception as e:
+            self.logger.error("Failed to restart pod", 
+                            error=str(e),
+                            pod=self.pod_name)
+            raise
+
     def setup_port_forward(self, remote_port: int) -> int:
         """
-        Set up port-forwarding to the pod.
+        Set up port-forwarding to the server pod.
         """
         port_queue = queue.Queue()
         
@@ -112,12 +162,6 @@ class Server:
     def get_triton_client(self, port: int) -> InferenceServerClient:
         """
         Create a Triton gRPC client.
-        
-        Args:
-            port: The local port where Triton server is forwarded
-            
-        Returns:
-            InferenceServerClient: The Triton gRPC client
         """
         try:
             client = grpcclient.InferenceServerClient(
@@ -146,7 +190,8 @@ class Server:
             # Get repository index
             repository_index = client.get_model_repository_index()
             
-            # Process each model in the repository
+            ready_models_count = 0
+
             for model in repository_index.models:
                 model_name = model.name
                 model_version = model.version
@@ -156,40 +201,30 @@ class Server:
                 is_ready = client.is_model_ready(model_name)
                 
                 if is_ready:
-                    # Only get config for ready models
-                    model_config = client.get_model_config(model_name)
-                    
-                    self.triton_models_info[model_name_full] = {
-                        "name": model_name,
-                        "version": model_version,
-                        "state": model.state,
-                    }
-                    
-                    self.logger.debug("Model information retrieved", 
+                    if not self.has_label(model_name_full):
+                        self.logger.debug("Model is ready, adding label to pod", 
+                                    model=model_name,
+                                    version=model_version,
+                                    state=model.state,
+                                    pod=self.pod_name)
+                        self.add_label(model_name_full)
+                    ready_models_count += 1
+                elif model.version == "":
+                    self.logger.debug("Model is in repository but no versions are loaded to the server", 
                                    model=model_name,
-                                   version=model_version,
-                                   state=model.state,
                                    pod=self.pod_name)
                 else:
-                    # Model is in repository but not loaded
-                    self.triton_models_info[model_name_full] = {
-                        "name": model_name,
-                        "version": model_version,
-                        "state": "UNAVAILABLE",
-                    }
-                    self.logger.debug("Model is in repository but not loaded to the server", 
-                                   model=model_name,
-                                   version=model_version or "unknown",
-                                   pod=self.pod_name)
-            
-            # Count only READY models
-            ready_models_count = sum(1 for info in self.triton_models_info.values() 
-                                   if info["state"] == "READY")
+                    if self.has_label(model_name_full):
+                        self.logger.warning("Model is in repository but not ready, removing label", 
+                                    model=model_name,
+                                    version=model_version,
+                                    pod=self.pod_name)
+                        self.remove_label(model_name_full)
             
             self.logger.info("Model information retrieved", 
                            pod=self.pod_name,
                            ready_model_count=ready_models_count,
-                           total_model_count=len(self.triton_models_info))
+                           total_model_count=len(repository_index.models))
             
         except Exception as e:
             self.logger.error("Failed to query Triton server", 
@@ -233,24 +268,20 @@ class Server:
                         pod=self.pod_name)
             
             if load:
-                # First load the model
+                # First load the model, then add labels for loaded versions
                 client.load_model(model_name)
                 
-                # Get versions that are actually loaded and ready
                 loaded_versions = self.count_versions(model_name, client, state="READY")
                 
-                # Add labels only for versions that are actually loaded
                 for version in loaded_versions:
                     self.add_label(f"{model_name}-v{version}")
                 
                 self.logger.info(f"Model loaded successfully", 
                                model=model_name,
                                version_count=len(loaded_versions),
-
-
                                pod=self.pod_name)
             else:
-                # First remove labels, then unload the model
+                # First remove labels for all versions, then unload the model
                 for version in model_versions:
                     self.remove_label(f"{model_name}-v{version}")
                 client.unload_model(model_name)
@@ -274,27 +305,34 @@ class Server:
     def unload_model(self, model_name: str):
         self.load_or_unload_model(model_name, load=False)
 
-    def sync_labels(self):
+    def has_label(self, model_name: str) -> bool:
         """
-        Sync the labels on the Triton server with the labels on the local pod
+        Check if a model label exists on the pod.
         """
-        self.logger.info("Starting label sync for models", 
-                        pod=self.pod_name,
-                        model_count=len(self.triton_models_info))
+        label_key = format_model_label(model_name)
         
-        for model_name, model_info in self.triton_models_info.items():
-            model_name = escape_model_name(model_info["name"])
-            model_version = model_info["version"]
-            model_name_full = f"{model_name}-v{model_version}"
-            model_state = model_info["state"]
-
-            if model_state == "READY":
-                self.add_label(model_name_full)
-            else:
-                self.remove_label(model_name_full)
-                
-        self.logger.info("Completed label sync for all models",
-                        pod=self.pod_name)
+        try:
+            self.refresh_pod()
+            
+            has_label = (
+                self.pod.metadata.labels is not None and 
+                label_key in self.pod.metadata.labels and 
+                self.pod.metadata.labels[label_key] == "true"
+            )
+            
+            self.logger.debug("Checked if label exists", 
+                            label=label_key,
+                            exists=has_label,
+                            pod=self.pod_name)
+            
+            return has_label
+            
+        except Exception as e:
+            self.logger.error("Failed to check model label", 
+                            model=model_name,
+                            error=str(e),
+                            pod=self.pod_name)
+            raise
 
     def add_label(self, model_name: str):
         """
@@ -302,15 +340,11 @@ class Server:
         Format: sonic.model.loaded/modelname-v1: true
         """
         label_key = format_model_label(model_name)
-        self.logger.info("Adding model label to pod", 
-                        label=label_key,
-                        pod=self.pod_name)
         
         try:
             # Check if label already exists
-            if self.pod.metadata.labels and label_key in self.pod.metadata.labels:
+            if self.has_label(model_name):
                 self.logger.debug("Model label already exists", 
-                                  model=model_name,
                                   label=label_key,
                                   pod=self.pod_name)
                 return
@@ -327,6 +361,9 @@ class Server:
                 namespace=self.pod_namespace,
                 body={"metadata": {"labels": self.pod.metadata.labels}}
             )
+            self.logger.info("Added model label to pod", 
+                            label=label_key,
+                            pod=self.pod_name)
             
         except Exception as e:
             self.logger.error("Failed to add model label", 
@@ -340,34 +377,27 @@ class Server:
         Remove a label from the Triton server
         """
         label_key = format_model_label(model_name)
-        self.logger.info("Removing model label from pod", 
-                        label=label_key,
-                        pod=self.pod_name)
         
         try:
-            # Get fresh pod data to ensure we have current labels
-            current_pod = self.v1.read_namespaced_pod(
-                name=self.pod_name,
-                namespace=self.pod_namespace
-            )
-            
-            if current_pod.metadata.labels and label_key in current_pod.metadata.labels:
-                # Create a new labels dict and set the label value to None
-                new_labels = dict(current_pod.metadata.labels)
-                new_labels[label_key] = None
-                
-                # Update the pod with new labels
-                self.v1.patch_namespaced_pod(
-                    name=self.pod_name,
-                    namespace=self.pod_namespace,
-                    body={"metadata": {"labels": new_labels}}
-                )
-
-            else:
+            if not self.has_label(model_name):
                 self.logger.debug("Model label not found", 
-                                  model=model_name,
                                   label=label_key,
                                   pod=self.pod_name)
+                return
+                
+            # Create a new labels dict and set the label value to None
+            new_labels = dict(self.pod.metadata.labels)
+            new_labels[label_key] = None
+            
+            # Update the pod with new labels
+            self.v1.patch_namespaced_pod(
+                name=self.pod_name,
+                namespace=self.pod_namespace,
+                body={"metadata": {"labels": new_labels}}
+            )
+            self.logger.info("Removed model label from pod", 
+                            label=label_key,
+                            pod=self.pod_name)
                 
         except Exception as e:
             self.logger.error("Failed to remove model label", 
