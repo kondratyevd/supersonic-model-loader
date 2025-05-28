@@ -93,19 +93,24 @@ class Server:
                 pass
             self.port_forward_process = None
 
-    def query_triton_server(self, url: str) -> requests.Response:
+    def query_triton_server(self, url: str, method: str = "POST") -> requests.Response:
         """
         Query the Triton server API.
+        
+        Args:
+            url: The URL to query
+            method: HTTP method to use ("GET" or "POST")
         """
         headers = {
             'Content-Type': 'application/json',
             'Accept': 'application/json'
         }
         
-        response = requests.post(
-            url,
-            headers=headers
-        )
+        if method == "GET":
+            response = requests.get(url, headers=headers)
+        else:
+            response = requests.post(url, headers=headers)
+            
         response.raise_for_status()
         return response
 
@@ -135,18 +140,25 @@ class Server:
             for model_data in models_data:
                 if not isinstance(model_data, dict):
                     self.logger.warning("Skipping invalid model data", 
-                                       model_data=model_data)
+                                      model_data=model_data)
                     continue
                 
                 model_name = model_data.get('name')
                 if not model_name:
                     self.logger.warning("Skipping model with no name", 
-                                       model_data=model_data)
+                                      model_data=model_data)
                     continue
                 
-                status_response = self.query_triton_server(f"{base_url}/v2/models/{model_name}/ready")                
+                status_response = self.query_triton_server(
+                    f"{base_url}/v2/models/{model_name}/ready",
+                    method="GET"
+                )
                 is_ready = status_response.text.lower() == 'true'
-                config_response = self.query_triton_server(f"{base_url}/v2/models/{model_name}/config")
+                
+                config_response = self.query_triton_server(
+                    f"{base_url}/v2/models/{model_name}/config",
+                    method="GET"
+                )
                 
                 try:
                     config_data = config_response.json()
@@ -296,10 +308,10 @@ class Server:
             
             base_url = f"http://localhost:{local_port}"
             
-            response = self.query_triton_server(f"{base_url}/metrics")
+            response = self.query_triton_server(f"{base_url}/metrics", method="GET")
             
             gpu_memory = {}
-
+            
             for line in response.text.split('\n'):
                 # Skip comments and empty lines
                 if line.startswith('#') or not line.strip():
