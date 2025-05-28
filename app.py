@@ -72,10 +72,10 @@ if __name__ == "__main__":
         # server.remove_label("deepmet-v1")
         if i==0:
             server.logger.warning("Will unload model from this server", pod=server.pod_name, model="deepmet")
-            server.unload_model("deepmet")
+            server.unload_model("higgsInteractionNet")
         else:
-            server.logger.warning("Will load model into this server", pod=server.pod_name, model="deepmet")
-            server.load_model("deepmet")
+            server.logger.warning("Will load model into this server", pod=server.pod_name, model="higgsInteractionNet")
+            server.load_model("higgsInteractionNet")
         # server.restart()
         server.get_gpu_memory()
 

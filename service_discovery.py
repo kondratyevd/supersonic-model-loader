@@ -1,14 +1,16 @@
-from utils import format_model_label
+from utils import format_model_label, escape_model_name
 from logger import get_logger
 from kubernetes import client
 
 class Service:
     def __init__(self, model_name_full: str, release_name: str, namespace: str):
         self.model_name_full = model_name_full
+        self.model_name_escaped = escape_model_name(model_name_full)
         self.label_key = format_model_label(model_name_full)
         self.release_name = release_name
         self.namespace = namespace
-        self.service_name = f"{self.release_name}-{self.model_name_full}"
+        self.service_name = f"{self.release_name}-{self.m
+                                                   odel_name_escaped}"
         self.logger = get_logger("service")
         self.v1 = client.CoreV1Api()
         

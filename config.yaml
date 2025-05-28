@@ -2,4 +2,4 @@ release_name: supersonic-test
 namespace: cms
 models:
   - deepmet-v1
-  - higgsinteractionnet-v1
+  - higgsInteractionNet-v1
