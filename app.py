@@ -76,10 +76,7 @@ if __name__ == "__main__":
         else:
             server.logger.warning("Will load model into this server", pod=server.pod_name, model="deepmet")
             server.load_model("deepmet")
-
-    for server in servers:
-        server.get_models()
-
-        # print(server.get_gpu_memory())
+        # server.restart()
+        server.get_gpu_memory()
 
     logger.info("Done!")
