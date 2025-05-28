@@ -1,7 +1,9 @@
 from utils import format_model_label, escape_model_name, find_free_port
 from logger import get_logger
 from kubernetes import client
-import requests
+import grpc
+import tritonclient.grpc as grpcclient
+from tritonclient.grpc import InferenceServerClient
 from typing import Dict
 import atexit
 import json
@@ -11,6 +13,7 @@ import signal
 import time
 import queue
 import threading
+import requests
 
 class Server:
     def __init__(self, pod):
@@ -19,7 +22,11 @@ class Server:
         self.pod_name = pod.metadata.name
         self.pod_namespace = pod.metadata.namespace
         self.v1 = client.CoreV1Api()
+
         self.port_forward_process = None
+        self.port_forward_local_port = None
+        self.port_forward_remote_port = None
+
         atexit.register(self.cleanup_port_forward)
         self.triton_models_info = {}
         # Get release name from pod labels
@@ -54,33 +61,41 @@ class Server:
                 
                 if self.port_forward_process.poll() is not None:
                     stderr = self.port_forward_process.stderr.read().decode()
-                    raise Exception(f"Port-forward failed: {stderr}")
+                    self.logger.error("Port-forward failed", 
+                                    error=stderr,
+                                    pod=self.pod_name)
+                    raise
                 
-                port_queue.put((free_port, self.port_forward_process))
+                port_queue.put(free_port)
                 
                 while True:
                     if self.port_forward_process.poll() is not None:
                         stderr = self.port_forward_process.stderr.read().decode()
-                        raise Exception(f"Port-forward terminated: {stderr}")
+                        self.logger.error("Port-forward terminated", 
+                                        error=stderr,
+                                        pod=self.pod_name)
+                        raise
                     time.sleep(0.1)
             except Exception as e:
                 self.logger.warning("Port-forwarding terminated", 
-                                    error=str(e),
-                                    pod=self.pod_name)
+                                 error=str(e),
+                                 pod=self.pod_name)
                 port_queue.put(None)
         
         pf_thread = threading.Thread(target=port_forward, daemon=True)
         pf_thread.start()
         
-        result = port_queue.get()
-        if result is None:
+        local_port = port_queue.get()
+        if local_port is None:
             raise Exception("Failed to establish port-forwarding")
         
-        local_port, process = result
         self.logger.info("Port-forwarding established", 
                        pod=self.pod_name,
-                       local_port=local_port)
+                       local_port=local_port,
+                       remote_port=remote_port)
         
+        self.port_forward_local_port = local_port
+        self.port_forward_remote_port = remote_port
         return local_port
 
     def cleanup_port_forward(self):
@@ -88,31 +103,36 @@ class Server:
         if self.port_forward_process:
             try:
                 os.killpg(os.getpgid(self.port_forward_process.pid), signal.SIGTERM)
-                self.logger.info("Port-forwarding cleaned up")
+                self.logger.info("Port-forwarding cleaned up",
+                                 local_port=self.port_forward_local_port,
+                                 remote_port=self.port_forward_remote_port)
             except:
                 pass
             self.port_forward_process = None
+            self.port_forward_local_port = None
+            self.port_forward_remote_port = None
 
-    def query_triton_server(self, url: str, method: str = "POST") -> requests.Response:
+    def get_triton_client(self, port: int) -> InferenceServerClient:
         """
-        Query the Triton server API.
+        Create a Triton gRPC client.
         
         Args:
-            url: The URL to query
-            method: HTTP method to use ("GET" or "POST")
-        """
-        headers = {
-            'Content-Type': 'application/json',
-            'Accept': 'application/json'
-        }
-        
-        if method == "GET":
-            response = requests.get(url, headers=headers)
-        else:
-            response = requests.post(url, headers=headers)
+            port: The local port where Triton server is forwarded
             
-        response.raise_for_status()
-        return response
+        Returns:
+            InferenceServerClient: The Triton gRPC client
+        """
+        try:
+            client = grpcclient.InferenceServerClient(
+                url=f"localhost:{port}",
+                verbose=False
+            )
+            return client
+        except Exception as e:
+            self.logger.error("Failed to create Triton client",
+                            error=str(e),
+                            pod=self.pod_name)
+            raise
 
     def get_models(self) -> Dict[str, Dict]:
         """
@@ -123,56 +143,26 @@ class Server:
                         pod=self.pod_name)
         
         try:
-            local_port = self.setup_port_forward(8000)
+            local_port = self.setup_port_forward(8001)  # gRPC port
+            client = self.get_triton_client(local_port)
             
-            base_url = f"http://localhost:{local_port}"
+            # Get repository index
+            repository_index = client.get_model_repository_index()
             
-            response = self.query_triton_server(f"{base_url}/v2/repository/index")
-            
-            try:
-                models_data = response.json()
-            except json.JSONDecodeError as e:
-                self.logger.error("Invalid JSON response from repository index", 
-                                error=str(e),
-                                content=response.text)
-                raise
-            
-            for model_data in models_data:
-                if not isinstance(model_data, dict):
-                    self.logger.warning("Skipping invalid model data", 
-                                      model_data=model_data)
-                    continue
+            # Process each model in the repository
+            for model in repository_index.models:
+                model_name = model.name
                 
-                model_name = model_data.get('name')
-                if not model_name:
-                    self.logger.warning("Skipping model with no name", 
-                                      model_data=model_data)
-                    continue
+                # Get model config
+                model_config = client.get_model_config(model_name)
                 
-                status_response = self.query_triton_server(
-                    f"{base_url}/v2/models/{model_name}/ready",
-                    method="GET"
-                )
-                is_ready = status_response.text.lower() == 'true'
-                
-                config_response = self.query_triton_server(
-                    f"{base_url}/v2/models/{model_name}/config",
-                    method="GET"
-                )
-                
-                try:
-                    config_data = config_response.json()
-                except json.JSONDecodeError as e:
-                    self.logger.error("Invalid JSON response from model config endpoint", 
-                                    model=model_name,
-                                    error=str(e),
-                                    content=config_response.text)
-                    raise
+                # Get model ready status
+                is_ready = client.is_model_ready(model_name)
                 
                 self.triton_models_info[model_name] = {
                     "name": model_name,
-                    "version": model_data.get("version", config_data.get("version", "unknown")),
-                    "state": model_data.get("state", "READY" if is_ready else "UNAVAILABLE"),
+                    "version": model.version,
+                    "state": model.state,
                 }
                 
                 self.logger.info("Model information retrieved", 
@@ -181,19 +171,41 @@ class Server:
                                state=self.triton_models_info[model_name]["state"],
                                pod=self.pod_name)
             
-        except requests.exceptions.RequestException as e:
-            self.logger.error("Failed to query Triton server API", 
-                            error=str(e),
-                            pod=self.pod_name)
-            raise
         except Exception as e:
-            self.logger.error("Unexpected error while getting models", 
+            self.logger.error("Failed to query Triton server", 
                             error=str(e),
                             pod=self.pod_name)
             raise
         finally:
             self.cleanup_port_forward()
-    
+
+    def unload_model(self, model_name: str):
+        """
+        Unload a model from the Triton server
+        """
+        self.logger.info("Unloading model", 
+                        model=model_name,
+                        pod=self.pod_name)
+        
+        try:
+            local_port = self.setup_port_forward(8001)  # gRPC port
+            client = self.get_triton_client(local_port)
+            
+            # Unload the model
+            client.unload_model(model_name)
+            
+            self.logger.info("Model unloaded successfully", 
+                           model=model_name,
+                           pod=self.pod_name)
+        except Exception as e:
+            self.logger.error("Failed to unload model", 
+                            model=model_name,
+                            error=str(e),
+                            pod=self.pod_name)
+            raise
+        finally:
+            self.cleanup_port_forward()
+
     def sync_labels(self):
         """
         Sync the labels on the Triton server with the labels on the local pod
@@ -304,64 +316,54 @@ class Server:
                         pod=self.pod_name)
         
         try:
-            local_port = self.setup_port_forward(8002)
+            local_port = self.setup_port_forward(8002)  # metrics port
             
-            base_url = f"http://localhost:{local_port}"
-            
-            response = self.query_triton_server(f"{base_url}/metrics", method="GET")
+            # Get metrics from the HTTP endpoint
+            response = requests.get(f"http://localhost:{local_port}/metrics")
+            response.raise_for_status()
+            metrics_text = response.text
             
             gpu_memory = {}
             
-            for line in response.text.split('\n'):
-                # Skip comments and empty lines
-                if line.startswith('#') or not line.strip():
+            # Process GPU metrics
+            for line in metrics_text.split('\n'):
+                if not line or line.startswith('#'):
                     continue
-                
-                # Parse metric line
-                try:
-                    # Format: metric_name{label1="value1",label2="value2"} value
-                    metric_name, value = line.split(' ', 1)
-                    value = float(value)
                     
+                # Parse Prometheus metric line
+                # Format: metric_name{label1="value1",label2="value2"} value
+                try:
+                    metric_name, rest = line.split('{', 1)
+                    labels_str, value = rest.split('}', 1)
+                    value = float(value.strip())
+                    
+                    # Parse labels
                     labels = {}
-                    if '{' in metric_name:
-                        name, label_str = metric_name.split('{', 1)
-                        label_str = label_str.rstrip('}')
-                        for label in label_str.split(','):
+                    for label in labels_str.split(','):
+                        if '=' in label:
                             key, val = label.split('=', 1)
                             labels[key] = val.strip('"')
-                        metric_name = name
-                    else:
-                        name = metric_name
                     
-                    # Process GPU memory metrics
-                    if metric_name == 'nv_gpu_memory_total_bytes':
-                        gpu_uuid = labels.get('gpu_uuid')
-                        if gpu_uuid is not None:
-                            if gpu_uuid not in gpu_memory:
-                                gpu_memory[gpu_uuid] = {}
-                            gpu_memory[gpu_uuid]['total_memory'] = int(value)
+                    gpu_uuid = labels.get('gpu_uuid')
+                    if gpu_uuid is None:
+                        continue
+                        
+                    if gpu_uuid not in gpu_memory:
+                        gpu_memory[gpu_uuid] = {}
                     
-                    elif metric_name == 'nv_gpu_memory_used_bytes':
-                        gpu_uuid = labels.get('gpu_uuid')
-                        if gpu_uuid is not None:
-                            if gpu_uuid not in gpu_memory:
-                                gpu_memory[gpu_uuid] = {}
-                            gpu_memory[gpu_uuid]['used_memory'] = int(value)
-                    
-                    # Log other interesting metrics
+                    if metric_name == "nv_gpu_memory_total_bytes":
+                        gpu_memory[gpu_uuid]['total_memory'] = int(value)
+                    elif metric_name == "nv_gpu_memory_used_bytes":
+                        gpu_memory[gpu_uuid]['used_memory'] = int(value)
                     elif metric_name in ['nv_gpu_utilization', 'nv_gpu_power_usage', 'nv_gpu_temperature']:
-                        gpu_uuid = labels.get('gpu_uuid')
-                        if gpu_uuid is not None:
-                            self.logger.debug(f"GPU {metric_name}", 
-                                           gpu_uuid=gpu_uuid,
-                                           value=value,
-                                           pod=self.pod_name)
-                
+                        self.logger.debug(f"GPU {metric_name}", 
+                                       gpu_uuid=gpu_uuid,
+                                       value=value,
+                                       pod=self.pod_name)
                 except Exception as e:
-                    self.logger.warning("Failed to parse metric line", 
-                                      line=line,
-                                      error=str(e))
+                    self.logger.warning(f"Failed to parse metric line: {line}", 
+                                      error=str(e),
+                                      pod=self.pod_name)
                     continue
             
             # Calculate free memory for each GPU
@@ -382,13 +384,8 @@ class Server:
             
             return gpu_memory
             
-        except requests.exceptions.RequestException as e:
-            self.logger.error("Failed to query Triton metrics API", 
-                            error=str(e),
-                            pod=self.pod_name)
-            raise
         except Exception as e:
-            self.logger.error("Unexpected error while getting GPU memory", 
+            self.logger.error("Failed to query Triton metrics", 
                             error=str(e),
                             pod=self.pod_name)
             raise
