@@ -56,7 +56,7 @@ if __name__ == "__main__":
     servers = app.get_servers()
     for server in servers:
         # server.sync_labels()
-        # server.unload_model("deepmet")
+        server.unload_model("deepmet")
         server.get_models()
 
         # print(server.get_gpu_memory())

@@ -153,23 +153,35 @@ class Server:
             for model in repository_index.models:
                 model_name = model.name
                 
-                # Get model config
-                model_config = client.get_model_config(model_name)
-                
-                # Get model ready status
+                # First check if model is ready
                 is_ready = client.is_model_ready(model_name)
                 
-                self.triton_models_info[model_name] = {
-                    "name": model_name,
-                    "version": model.version,
-                    "state": model.state,
-                }
-                
-                self.logger.info("Model information retrieved", 
-                               model=model_name,
-                               version=self.triton_models_info[model_name]["version"],
-                               state=self.triton_models_info[model_name]["state"],
-                               pod=self.pod_name)
+                if is_ready:
+                    # Only get config for ready models
+                    model_config = client.get_model_config(model_name)
+                    
+                    self.triton_models_info[model_name] = {
+                        "name": model_name,
+                        "version": model.version,
+                        "state": model.state,
+                    }
+                    
+                    self.logger.info("Model information retrieved", 
+                                   model=model_name,
+                                   version=self.triton_models_info[model_name]["version"],
+                                   state=self.triton_models_info[model_name]["state"],
+                                   pod=self.pod_name)
+                else:
+                    # Model is in repository but not loaded
+                    self.triton_models_info[model_name] = {
+                        "name": model_name,
+                        "version": model.version,
+                        "state": "UNAVAILABLE",
+                    }
+                    self.logger.info("Model is in repository but not loaded to the server", 
+                                   model=model_name,
+                                   version=model.version,
+                                   pod=self.pod_name)
             
         except Exception as e:
             self.logger.error("Failed to query Triton server", 
