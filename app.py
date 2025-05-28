@@ -75,7 +75,7 @@ if __name__ == "__main__":
             server.unload_model("higgsInteractionNet")
         else:
             server.logger.warning("Will load model into this server", pod=server.pod_name, model="higgsInteractionNet")
-            server.load_model("higgsInteractionNet")
+            server.unload_model("higgsInteractionNet")
         # server.restart()
         server.get_gpu_memory()
 
