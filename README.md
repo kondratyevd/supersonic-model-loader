@@ -12,3 +12,4 @@ This repo includes developments for dynamic model loading in [SuperSONIC](https:
 ### Caveats
 
 - Kubernetes resources can only contain alphanumerical characters and hyphens in their names. We need to be careful when creating resources and labels based on model names.
+- If a model is present in the repository but not loaded into any servers, we don't know how many versions of the model there are.

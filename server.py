@@ -202,6 +202,20 @@ class Server:
         finally:
             self.cleanup_port_forward()
 
+    def count_versions(self, model_name: str, client: InferenceServerClient, state: str = None) -> list:
+        """
+        Count versions of a model in the repository.
+        """
+        repository_index = client.get_model_repository_index()
+        versions = []
+        
+        for model in repository_index.models:
+            if model.name == model_name and (state is None or model.state == state):
+                if model.version != '':
+                    versions.append(model.version)
+        
+        return versions
+
     def load_or_unload_model(self, model_name: str, load: bool):
         """
         Load or unload a model into the Triton server
@@ -211,39 +225,39 @@ class Server:
             local_port = self.setup_port_forward(8001)  # gRPC port
             client = self.get_triton_client(local_port)
             
-            # Get repository index to find all versions
-            repository_index = client.get_model_repository_index()
-            model_versions = []
-            
-            # Find all versions of the model
-            for model in repository_index.models:
-                if model.name == model_name:
-                    model_versions.append(model.version)
-            
-            if not model_versions:
-                self.logger.error(f"Model not found in repository", 
-                                 pod=self.pod_name,
-                                 model_name=model_name)
-                raise
+            # Get all versions from repository
+            model_versions = self.count_versions(model_name, client)
+            model_versions_ready = self.count_versions(model_name, client, state="READY")
 
-            self.logger.info(f"Found {len(model_versions)} versions of model {model_name} in repository", 
-                             pod=self.pod_name)
+            self.logger.info(f"Counting model versions",
+                        model=model_name,
+                        versions_in_repo=len(model_versions),
+                        versions_ready=len(model_versions_ready),
+                        pod=self.pod_name)
             
             if load:
-                # First load the model, then add labels
+                # First load the model
                 client.load_model(model_name)
-                for version in model_versions:
+                
+                # Get versions that are actually loaded and ready
+                loaded_versions = self.count_versions(model_name, client, state="READY")
+                
+                # Add labels only for versions that are actually loaded
+                for version in loaded_versions:
                     self.add_label(f"{model_name}-v{version}")
+                
+                self.logger.info(f"Model loaded successfully with {len(loaded_versions)} versions", 
+                               model=model_name,
+                               pod=self.pod_name)
             else:
                 # First remove labels, then unload the model
                 for version in model_versions:
                     self.remove_label(f"{model_name}-v{version}")
                 client.unload_model(model_name)
-
-            self.logger.info(f"Model {action}ed successfully", 
-                           model=model_name,
-                           version_count=len(model_versions),
-                           pod=self.pod_name)
+                
+                self.logger.info(f"Model unloaded successfully", 
+                               model=model_name,
+                               pod=self.pod_name)
             
         except Exception as e:
             self.logger.error(f"Failed to {action} model", 
@@ -295,7 +309,7 @@ class Server:
         try:
             # Check if label already exists
             if self.pod.metadata.labels and label_key in self.pod.metadata.labels:
-                self.logger.warning("Model label already exists", 
+                self.logger.debug("Model label already exists", 
                                   model=model_name,
                                   label=label_key,
                                   pod=self.pod_name)
@@ -350,7 +364,7 @@ class Server:
                 )
 
             else:
-                self.logger.warning("Model label not found", 
+                self.logger.debug("Model label not found", 
                                   model=model_name,
                                   label=label_key,
                                   pod=self.pod_name)

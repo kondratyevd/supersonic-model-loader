@@ -57,7 +57,7 @@ if __name__ == "__main__":
     for i, server in enumerate(servers):
         server.logger.info(f"Processing server {i}", pod=server.pod_name)
         # server.sync_labels()
-        # server.unload_model("deepmet")
+        # server.remove_label("deepmet-v1")
         if i==0:
             server.logger.warning("Will unload deepmet model from this server", pod=server.pod_name)
             server.unload_model("deepmet")
