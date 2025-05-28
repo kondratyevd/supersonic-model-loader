@@ -48,8 +48,6 @@ class App:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Triton server model loader')
-    parser.add_argument('--config', type=str, default='config.yaml',
-                      help='Path to config file')
     parser.add_argument('-d', '--debug', action='store_true',
                       help='Enable debug logging')
     args = parser.parse_args()
