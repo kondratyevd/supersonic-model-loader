@@ -70,11 +70,13 @@ if __name__ == "__main__":
         # server.remove_label("deepmet-v1")
         if i==0:
             server.logger.warning("Will unload model from this server", pod=server.pod_name, model="deepmet")
-            server.unload_model("higgsInteractionNet")
+            server.unload_model("deepmet")
         else:
-            server.logger.warning("Will load model into this server", pod=server.pod_name, model="higgsInteractionNet")
-            server.load_model("higgsInteractionNet")
+            server.logger.warning("Will load model into this server", pod=server.pod_name, model="deepmet")
+            server.load_model("deepmet")
         # server.restart()
         # server.get_gpu_memory()
+        server.get_models()
+    app.triton_deployment.get_aggregated_model_repository_index()
 
     logger.info("Done!")

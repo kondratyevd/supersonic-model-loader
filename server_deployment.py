@@ -1,8 +1,10 @@
 from kubernetes import client, config
 from kubernetes.client.rest import ApiException
 from logger import get_logger
-from typing import List
+from typing import List, Dict
 from server import Server
+import tritonclient.grpc as grpcclient
+from tritonclient.grpc.service_pb2 import RepositoryIndexResponse
 
 class ServerDeployment:
     def __init__(self, release_name: str, namespace: str):
@@ -116,3 +118,67 @@ class ServerDeployment:
                             target_replicas=replicas,
                             error=str(e))
             raise
+
+    def get_aggregated_model_repository_index(self) -> RepositoryIndexResponse:
+        """
+        Get and aggregate model repository indices from all Triton servers in the deployment.
+        Returns a merged RepositoryIndexResponse containing unique models from all servers.
+        """
+        self.logger.info("Aggregating model repository indices from all servers")
+        
+        # Get all servers
+        servers = self.get_servers()
+        
+        # Create merged response
+        merged = RepositoryIndexResponse()
+        
+        # Dictionary to track models by name
+        # Each model name maps to a dict of version -> model
+        models_by_name = {}
+        
+        for server in servers:
+            try:
+                # Get models from this server
+                local_port = server.setup_port_forward(8001)  # gRPC port
+                client = server.get_triton_client(local_port)
+                
+                # Get repository index
+                repository_index = client.get_model_repository_index()
+                
+                # Process each model
+                for model in repository_index.models:
+                    model_name = model.name
+                    
+                    # Initialize dict for this model name if not exists
+                    if model_name not in models_by_name:
+                        models_by_name[model_name] = {}
+                    
+                    # If model has a version, add/update it in the versions dict
+                    if model.version:
+                        models_by_name[model_name][model.version] = model
+                    # If model has no version, only add it if we don't have any versions yet
+                    elif not models_by_name[model_name]:
+                        models_by_name[model_name][""] = model
+                
+            except Exception as e:
+                self.logger.error("Failed to get model repository index from server",
+                                error=str(e),
+                                pod=server.pod_name)
+                continue
+            finally:
+                server.cleanup_port_forward()
+        
+        # Clean up unversioned entries if versions exist
+        for model_versions in models_by_name.values():
+            if len(model_versions) > 1 and "" in model_versions:
+                del model_versions[""]
+        
+        # Add all models to the merged response
+        for model_versions in models_by_name.values():
+            merged.models.extend(model_versions.values())
+        
+        # print(merged)
+        self.logger.info("Successfully aggregated model repository indices",
+                        total_models=len(merged.models))
+        
+        return merged
